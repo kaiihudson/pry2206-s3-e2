@@ -149,104 +149,165 @@ END;
 /*
     CASO 2
 */
-
 -- se ejecuta con respecto al anno anterior
-var anno_proceso number;
-exec :anno_proceso := extract(year from sysdate)-1;
+VAR anno_proceso NUMBER;
+EXEC :anno_proceso := EXTRACT(YEAR FROM SYSDATE)-1;
 
 TRUNCATE TABLE medico_servicio_comunidad;
 
 DECLARE
-    CURSOR nombre_cursor_caso2 IS
+
+    -- cursor para unidades
+    CURSOR cursor_aux_unidad IS
     SELECT
-        COUNT(*),
-        med_run
+        uni_id,
+        nombre
     FROM
-        atencion
-    WHERE
-        EXTRACT(YEAR FROM fecha_atencion) = :anno_proceso
-    GROUP BY
-        med_run;
+        unidad
+    ORDER BY
+        nombre;
 
-    TYPE tipos_fila_cursor_caso2 IS RECORD (
-            atenciones NUMBER,
-            med_run    NUMBER
+    TYPE tipos_fila_cursor_aux_unidad IS RECORD (
+        unidad_id     NUMBER,
+        unidad_nombre unidad.nombre%TYPE
     );
-    fila_cursor_caso2  tipos_fila_cursor_caso2;
-    ix_m_unidad_id     NUMBER;
-    ix_m_unidad_nombre unidad.nombre%TYPE;
-    ix_m_run_med       medico_servicio_comunidad.nombre_medico%TYPE;
-    ix_m_nombre_med    medico_servicio_comunidad.nombre_medico%TYPE;
-    ix_m_destino       medico_servicio_comunidad.destinacion%TYPE;
+
+    fila_cursor_aux_unidad tipos_fila_cursor_aux_unidad;
+
+    -- cursor para medicos con parametro
+    CURSOR nombre_cursor_caso2_medico (
+        id_unidad NUMBER
+    ) IS
+    SELECT
+        med_run,
+        apaterno,
+        pnombre
+        || ' '
+        || NVL(snombre, '')
+        || ' '
+        || apaterno
+        || ' '
+        || NVL(amaterno, '') nombre_medico
+    FROM
+        medico
+    WHERE
+        uni_id = id_unidad
+    ORDER BY
+        apaterno;
+
+    TYPE tipos_fila_cursor_caso2_medico IS RECORD (
+        run_med     medico.med_run%TYPE,
+        apaterno    medico.apaterno%TYPE,
+        nombre_med  medico_servicio_comunidad.nombre_medico%TYPE
+    );
+
+    fila_cursor_caso2_medico tipos_fila_cursor_caso2_medico;
+
+    -- variables para insert
+    ix_m_destino      medico_servicio_comunidad.destinacion%TYPE;
+    ix_m_atenciones   NUMBER;
+
 BEGIN
-    OPEN nombre_cursor_caso2;
+
+    OPEN cursor_aux_unidad;
+
+    -- desde esta lista de unidades
     LOOP
-        FETCH nombre_cursor_caso2 INTO fila_cursor_caso2;
-        EXIT WHEN nombre_cursor_caso2%notfound;
-        SELECT
-            med.med_run,
-            med.pnombre
-            || ' '
-            || nvl(med.snombre, '')
-            || ' '
-            || med.apaterno
-            || ' '
-            || nvl(med.amaterno, ''),
-            med.uni_id,
-            uni.nombre
-        INTO
-            ix_m_run_med,
-            ix_m_nombre_med,
-            ix_m_unidad_id,
-            ix_m_unidad_nombre
-        FROM
-                 medico med
-            INNER JOIN unidad uni ON med.uni_id = uni.uni_id
-        WHERE
-            med.med_run = fila_cursor_caso2.med_run;
 
-        CASE
-            -- adulto 400 ambulatoria 100 Servicio de Atención Primaria de Urgencia (SAPU)
-            WHEN ix_m_unidad_id = 100 THEN
-                ix_m_destino := 'Servicio de Atención Primaria de Urgencia (SAPU)';
-            -- urgencia 200 if  between 0 and 3 Servicio de Atención Primaria de Urgencia (SAPU)
-            -- urgencia 200 more than 3 Hospitales del área de la Salud Pública
-            WHEN ix_m_unidad_id = 200 THEN
-                IF fila_cursor_caso2.atenciones BETWEEN 0 AND 3 THEN
-                    ix_m_destino := 'Servicio de Atención Primaria de Urgencia (SAPU)';
+        FETCH cursor_aux_unidad INTO fila_cursor_aux_unidad;
+
+        EXIT WHEN cursor_aux_unidad%NOTFOUND;
+
+        -- usando cada una de las unidades
+        OPEN nombre_cursor_caso2_medico(fila_cursor_aux_unidad.unidad_id);
+
+        LOOP
+
+            FETCH nombre_cursor_caso2_medico
+            INTO fila_cursor_caso2_medico;
+
+            EXIT WHEN nombre_cursor_caso2_medico%NOTFOUND;
+
+            -- trae cantidad de atenciones del anno de proceso
+            SELECT
+                COUNT(ate_id)
+            INTO
+                ix_m_atenciones
+            FROM
+                atencion
+            WHERE
+                    med_run = fila_cursor_caso2_medico.run_med
+                AND EXTRACT(YEAR FROM fecha_atencion) = :anno_proceso;
+
+            -- cambia un valor basandote en ciertas condiciones
+            CASE
+
+                -- adulto 400 ambulatoria 100 Servicio de Atención Primaria de Urgencia (SAPU)
+                WHEN fila_cursor_aux_unidad.unidad_id = 100 THEN
+                    ix_m_destino :=
+                        'Servicio de Atención Primaria de Urgencia (SAPU)';
+
+                -- urgencia 200 if between 0 and 3 Servicio de Atención Primaria de Urgencia (SAPU)
+                -- urgencia 200 more than 3 Hospitales del área de la Salud Pública
+                WHEN fila_cursor_aux_unidad.unidad_id = 200 THEN
+
+                    IF ix_m_atenciones BETWEEN 0 AND 3 THEN
+                        ix_m_destino :=
+                            'Servicio de Atención Primaria de Urgencia (SAPU)';
+                    ELSE
+                        ix_m_destino :=
+                            'Hospitales del área de la Salud Pública';
+                    END IF;
+
+                -- cirugia 700 plastica 800 more than 3 Hospitales del área de la Salud Pública
+                WHEN fila_cursor_aux_unidad.unidad_id IN (700, 800) THEN
+
+                    IF ix_m_atenciones > 3 THEN
+                        ix_m_destino :=
+                            'Hospitales del área de la Salud Pública';
+                    ELSE
+                        ix_m_destino :=
+                            'Consultorios Generales';
+                    END IF;
+
+                -- psiq 600 Centros de Salud Familiar (CESFAM)
+                WHEN fila_cursor_aux_unidad.unidad_id = 600 THEN
+                    ix_m_destino :=
+                        'Centros de Salud Familiar (CESFAM)';
+
+                -- else Consultorios Generales
                 ELSE
-                    ix_m_destino := 'Hospitales del área de la Salud Pública';
-                END IF;
-            -- cirugia 700 plastica 800 more than 3 Hospitales del área de la Salud Pública
-            WHEN
-                ix_m_unidad_id IN ( 700, 800 )
-                AND fila_cursor_caso2.atenciones > 3
-            THEN
-                ix_m_destino := 'Hospitales del área de la Salud Pública';
-            -- psiq 600 Centros de Salud Familiar (CESFAM)
-            WHEN ix_m_unidad_id = 600 THEN
-                ix_m_destino := 'Centros de Salud Familiar (CESFAM)';
-            -- else Consultorios Generales
-            ELSE
-                ix_m_destino := 'Consultorios Generales';
-        END CASE;
+                    ix_m_destino := 'Consultorios Generales';
 
-        INSERT INTO medico_servicio_comunidad (
-            unidad,
-            run_medico,
-            nombre_medico,
-            total_aten_medicas,
-            destinacion
-        ) VALUES ( ix_m_unidad_nombre,
-                   fila_cursor_caso2.med_run,
-                   ix_m_nombre_med,
-                   fila_cursor_caso2.atenciones,
-                   ix_m_destino );
+            END CASE;
+
+            -- inserta la info
+            INSERT INTO medico_servicio_comunidad (
+                unidad,
+                run_medico,
+                nombre_medico,
+                total_aten_medicas,
+                destinacion
+            ) VALUES (
+                fila_cursor_aux_unidad.unidad_nombre,
+                fila_cursor_caso2_medico.run_med,
+                fila_cursor_caso2_medico.nombre_med,
+                ix_m_atenciones,
+                ix_m_destino
+            );
+
+        END LOOP;
+
+        -- desecha el caso
+        CLOSE nombre_cursor_caso2_medico;
 
     END LOOP;
 
+    -- desecha el caso
+    CLOSE cursor_aux_unidad;
+
+    -- guarda info
     COMMIT;
+
 END;
 /
-
-
